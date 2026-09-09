@@ -1,0 +1,75 @@
+name: Diagnose ARM64 Pycairo loader
+on:
+  push:
+    branches: [codex/pycairo-loader-probe]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {config: win_arm64_python3.14.____cp314, subdir: win-arm64, runner: windows-11-arm, extra_channel: ''}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Attest runner and prepare build orchestration
+        shell: pwsh
+        run: |
+          $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+          if ('${{ matrix.subdir }}' -eq 'win-arm64' -and $arch -ne 'Arm64') { throw "Expected native ARM64 OS, got $arch" }
+          Write-Host "OS architecture: $arch; build and target platform: ${{ matrix.subdir }}"
+          Invoke-WebRequest https://github.com/mamba-org/micromamba-releases/releases/download/1.5.10-0/micromamba-win-64 -OutFile "$env:RUNNER_TEMP\micromamba.exe"
+      - name: Retrieve verified unpublished prerequisites
+        if: matrix.subdir == 'win-arm64'
+        shell: cmd
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/ClayWarren/cairo-feedstock/actions/artifacts/10085932435/zip > "%RUNNER_TEMP%\cairo.zip"
+          if errorlevel 1 exit /b 1
+          gh api repos/ClayWarren/fontconfig-feedstock/actions/artifacts/10085155281/zip > "%RUNNER_TEMP%\fontconfig.zip"
+          if errorlevel 1 exit /b 1
+          gh api repos/ClayWarren/pycairo-feedstock/actions/artifacts/10087882885/zip > "%RUNNER_TEMP%\loader.zip"
+          if errorlevel 1 exit /b 1
+      - name: Verify exact package hashes and stage local channel
+        shell: pwsh
+        run: |
+          Expand-Archive "$env:RUNNER_TEMP\loader.zip" loader
+          New-Item -ItemType Directory -Path C:\pycairo-local\${{ matrix.subdir }} -Force | Out-Null
+          if ('${{ matrix.subdir }}' -eq 'win-arm64') {
+            $inputs = @(
+              @{ archive='cairo'; file='cairo-1.18.4-h39bda8e_3.conda'; sha='e308c353aa1f728445c1c60eb061fddf7a8ab7001c975275cb936d53f2322a09' },
+              @{ archive='fontconfig'; file='fontconfig-2.18.3-hb7620e2_2.conda'; sha='24ff81517612d8976a970c16eeb490e14acaff92b6e8910700353e7aee2dda4d' }
+            )
+            foreach ($item in $inputs) {
+              Expand-Archive "$env:RUNNER_TEMP\$($item.archive).zip" "$env:RUNNER_TEMP\$($item.archive)"
+              $package = Get-ChildItem "$env:RUNNER_TEMP\$($item.archive)" -Recurse -Filter $item.file
+              if (@($package).Count -ne 1) { throw "Expected one $($item.file)" }
+              $hash = (Get-FileHash $package.FullName -Algorithm SHA256).Hash.ToLower()
+              if ($hash -ne $item.sha) { throw "Unexpected package hash: $hash" }
+              Write-Host "Verified $($package.Name): $hash"
+              Copy-Item $package.FullName C:\pycairo-local\win-arm64
+            }
+          }
+      - name: Build and run upstream and installed-package tests
+        shell: cmd
+        run: |
+          set "CONDA_SUBDIR=win-64"
+          "%RUNNER_TEMP%\micromamba.exe" create -y -p C:\pycairo-tools -c conda-forge conda-build conda-index
+          if errorlevel 1 exit /b 1
+          call C:\pycairo-tools\condabin\conda.bat activate C:\pycairo-tools
+          if errorlevel 1 exit /b 1
+          set "CONDA_SUBDIR=${{ matrix.subdir }}"
+          set "CONDA_SOLVER=libmamba"
+          set "CONDA_CHANNEL_PRIORITY=strict"
+          call conda index C:\pycairo-local
+          if errorlevel 1 exit /b 1
+          call conda create -y -p C:\probe-env --override-channels -c file:///C:/pycairo-local -c conda-forge python=3.14.7 cairo=1.18.4 glib expat freetype libpng zlib
+          if errorlevel 1 exit /b 1
+          C:\probe-env\python.exe pycairo-loader-probe.py
+          if errorlevel 1 exit /b 1
