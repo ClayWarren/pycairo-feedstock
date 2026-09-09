@@ -9,11 +9,13 @@ import sys
 root = Path(sys.prefix)
 pyd = next(Path('loader').glob('*.pyd')).resolve()
 code = 'import importlib.util; p=' + repr(str(pyd)) + '; s=importlib.util.spec_from_file_location("_cairo",p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.cairo_version_string())'
-for label, setup in [('default', ''), ('explicit-dll-directory', 'import os; d=os.add_dll_directory(' + repr(str(root/'Library'/'bin')) + '); ')]:
+all_path_setup = "import os\nfor p in os.environ.get('PATH', '').split(os.pathsep):\n    try: os.add_dll_directory(p)\n    except OSError: pass\n"
+for label, setup in [('default', ''), ('upstream-all-PATH', all_path_setup), ('explicit-dll-directory', 'import os; d=os.add_dll_directory(' + repr(str(root/'Library'/'bin')) + '); ')]:
     result = subprocess.run([sys.executable, '-c', setup+code], capture_output=True, text=True)
     print(label, result.returncode, result.stdout, result.stderr, flush=True)
 
 handle = os.add_dll_directory(str(root/'Library'/'bin'))
+exec(all_path_setup)
 kernel = ctypes.WinDLL('kernel32', use_last_error=True)
 kernel.GetProcAddress.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 kernel.GetProcAddress.restype = ctypes.c_void_p
